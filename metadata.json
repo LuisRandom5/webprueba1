@@ -1,0 +1,6 @@
+{
+  "name": "Museo Blanco - Recorrido Virtual 3D & AR",
+  "description": "Galería de arte inmersiva en un pasillo blanco arquitectónico con avance por scroll, iluminación dinámica, sombras suaves y realidad aumentada.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
