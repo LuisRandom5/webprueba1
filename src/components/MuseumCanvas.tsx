@@ -8,26 +8,24 @@ interface MuseumCanvasProps {
   scrollProgress: number; // 0 to 1
   lightingPreset: LightingPreset;
   onActiveArtworkChange: (artwork: Artwork | null, proximity: number) => void;
-  onArtworkClick: (artwork: Artwork) => void;
-  focusedArtworkId: string | null;
 }
 
-interface CameraWaypoint {
-  progress: number;
-  camPos: THREE.Vector3;
-  targetPos: THREE.Vector3;
-  artworkId?: string;
-  isFocusedOnArt?: boolean;
+interface PathSegment {
+  tRange: [number, number]; // [tStart, tEnd]
+  getTransform: (localT: number) => {
+    camPos: THREE.Vector3;
+    lookAt: THREE.Vector3;
+    activeArt: Artwork | null;
+    focusIntensity: number; // 0 = walking, 1 = fully focused on painting
+  };
 }
 
 export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
   scrollProgress,
   lightingPreset,
   onActiveArtworkChange,
-  onArtworkClick,
-  focusedArtworkId,
 }) => {
-  const mountRef = useRef<HTMLDivElement>(null);
+  const mountDivRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -35,174 +33,212 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
   const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
   const dirLightRef = useRef<THREE.DirectionalLight | null>(null);
   const spectatorLightRef = useRef<THREE.PointLight | null>(null);
-  const paintingMeshesRef = useRef<{ [artworkId: string]: THREE.Group }>({});
-  const currentCamPos = useRef(new THREE.Vector3(0, 1.8, 4));
-  const currentLookAt = useRef(new THREE.Vector3(0, 1.8, -5));
+  const currentCamPos = useRef(new THREE.Vector3(0, 1.75, 4));
+  const currentLookAt = useRef(new THREE.Vector3(0, 1.75, -4));
   const reqIdRef = useRef<number>(0);
-  const isDraggingRef = useRef(false);
-  const previousMousePos = useRef({ x: 0, y: 0 });
-  const userLookOffset = useRef(new THREE.Vector2(0, 0));
 
-  // Compute camera path waypoints through the white museum corridor
-  const waypoints = useRef<CameraWaypoint[]>([
-    // Start / Entrance
-    {
-      progress: 0.0,
-      camPos: new THREE.Vector3(0, 1.8, 3.5),
-      targetPos: new THREE.Vector3(0, 1.8, -5),
-    },
-    // Approaching Hallway entry
-    {
-      progress: 0.08,
-      camPos: new THREE.Vector3(0, 1.8, -1.5),
-      targetPos: new THREE.Vector3(-0.6, 1.8, -6),
-    },
-    // Artwork 1 - Van Leyden (Left Wall Z = -6)
-    {
-      progress: 0.18,
-      camPos: new THREE.Vector3(-1.15, 1.85, -6.0),
-      targetPos: new THREE.Vector3(-2.7, 1.85, -6.0),
-      artworkId: 'chiaroscuro',
-      isFocusedOnArt: true,
-    },
-    // Transition 1 -> 2: Turning back down hallway
-    {
-      progress: 0.28,
-      camPos: new THREE.Vector3(0, 1.8, -9.5),
-      targetPos: new THREE.Vector3(0.6, 1.8, -13),
-    },
-    // Artwork 2 - Impressionism (Right Wall Z = -13)
-    {
-      progress: 0.38,
-      camPos: new THREE.Vector3(1.15, 1.85, -13.0),
-      targetPos: new THREE.Vector3(2.7, 1.85, -13.0),
-      artworkId: 'impressionism',
-      isFocusedOnArt: true,
-    },
-    // Transition 2 -> 3: Turning back down hallway
-    {
-      progress: 0.48,
-      camPos: new THREE.Vector3(0, 1.8, -16.5),
-      targetPos: new THREE.Vector3(-0.6, 1.8, -20),
-    },
-    // Artwork 3 - Surrealism (Left Wall Z = -20)
-    {
-      progress: 0.58,
-      camPos: new THREE.Vector3(-1.15, 1.85, -20.0),
-      targetPos: new THREE.Vector3(-2.7, 1.85, -20.0),
-      artworkId: 'surrealism',
-      isFocusedOnArt: true,
-    },
-    // Transition 3 -> 4: Turning back down hallway
-    {
-      progress: 0.68,
-      camPos: new THREE.Vector3(0, 1.8, -23.5),
-      targetPos: new THREE.Vector3(0.6, 1.8, -27),
-    },
-    // Artwork 4 - Ultramarine (Right Wall Z = -27)
-    {
-      progress: 0.78,
-      camPos: new THREE.Vector3(1.15, 1.85, -27.0),
-      targetPos: new THREE.Vector3(2.7, 1.85, -27.0),
-      artworkId: 'ultramarine',
-      isFocusedOnArt: true,
-    },
-    // Transition 4 -> 5: Moving into the grand end gallery
-    {
-      progress: 0.88,
-      camPos: new THREE.Vector3(0, 1.85, -30.5),
-      targetPos: new THREE.Vector3(0, 1.95, -34.8),
-    },
-    // Artwork 5 - Constructivism (Back Wall Z = -34.8)
-    {
-      progress: 1.0,
-      camPos: new THREE.Vector3(0, 1.95, -32.0),
-      targetPos: new THREE.Vector3(0, 1.95, -34.8),
-      artworkId: 'constructivism',
-      isFocusedOnArt: true,
-    },
-  ]).current;
+  // Smooth Hermite / S-Curve helper
+  const smoothstep = (t: number) => t * t * (3 - 2 * t);
 
-  // Interpolate camera position and target between waypoints
-  const getCameraTarget = (t: number) => {
-    // If user clicked a specific artwork to focus, lock to that artwork's target
-    if (focusedArtworkId) {
-      const art = ARTWORKS.find((a) => a.id === focusedArtworkId);
-      if (art) {
-        return {
-          pos: new THREE.Vector3(...art.cameraTarget.pos),
-          target: new THREE.Vector3(...art.cameraTarget.lookAt),
-          activeArt: art,
-          proximity: 1.0,
-        };
-      }
-    }
+  // Compute camera position and look target along the cinematic on-rails museum corridor
+  const computeCameraState = (progress: number) => {
+    const t = Math.max(0, Math.min(1, progress));
 
-    const clampedT = Math.max(0, Math.min(1, t));
-
-    // Find bounding waypoints
-    let p0 = waypoints[0];
-    let p1 = waypoints[waypoints.length - 1];
-
-    for (let i = 0; i < waypoints.length - 1; i++) {
-      if (clampedT >= waypoints[i].progress && clampedT <= waypoints[i + 1].progress) {
-        p0 = waypoints[i];
-        p1 = waypoints[i + 1];
-        break;
-      }
-    }
-
-    const range = p1.progress - p0.progress || 1;
-    const localT = (clampedT - p0.progress) / range;
-    // Smooth cubic easing
-    const smoothT = localT * localT * (3 - 2 * localT);
-
-    const pos = new THREE.Vector3().lerpVectors(p0.camPos, p1.camPos, smoothT);
-    const target = new THREE.Vector3().lerpVectors(p0.targetPos, p1.targetPos, smoothT);
-
-    // Determine active artwork
+    let camPos = new THREE.Vector3();
+    let lookAt = new THREE.Vector3();
     let activeArt: Artwork | null = null;
-    let proximity = 0;
+    let focusIntensity = 0;
 
-    for (const wp of waypoints) {
-      if (wp.artworkId && wp.isFocusedOnArt) {
-        const dist = Math.abs(clampedT - wp.progress);
-        if (dist < 0.08) {
-          activeArt = ARTWORKS.find((a) => a.id === wp.artworkId) || null;
-          proximity = Math.max(0, 1 - dist / 0.08);
-          break;
-        }
-      }
+    // --- SEGMENT 0: ENTRANCE CORRIDOR WALK [0.00 -> 0.08] ---
+    if (t < 0.08) {
+      const localT = smoothstep(t / 0.08);
+      const z = THREE.MathUtils.lerp(3.5, -2.5, localT);
+      camPos.set(0, 1.75, z);
+      lookAt.set(0, 1.75, z - 8);
+    }
+    // --- OBRA 1: VAN LEYDEN (LEFT WALL, Z = -6) ---
+    // [0.08 -> 0.14]: Turn & Approach left wall
+    else if (t < 0.14) {
+      const localT = smoothstep((t - 0.08) / 0.06);
+      const z = THREE.MathUtils.lerp(-2.5, -6.0, localT);
+      const x = THREE.MathUtils.lerp(0, -1.15, localT);
+      camPos.set(x, 1.75 + localT * 0.1, z);
+      // LookAt rotates smoothly from forward to facing the painting squarely on the left wall
+      const targetX = THREE.MathUtils.lerp(0, -2.7, localT);
+      const targetZ = THREE.MathUtils.lerp(z - 8, -6.0, localT);
+      lookAt.set(targetX, 1.85, targetZ);
+      activeArt = ARTWORKS[0];
+      focusIntensity = localT;
+    }
+    // [0.14 -> 0.23]: FULL LOCKED FRONTAL INSPECTION OF OBRA 1
+    else if (t < 0.23) {
+      camPos.set(-1.15, 1.85, -6.0);
+      lookAt.set(-2.7, 1.85, -6.0);
+      activeArt = ARTWORKS[0];
+      focusIntensity = 1.0;
+    }
+    // [0.23 -> 0.28]: Turn back to hallway axis and resume walk
+    else if (t < 0.28) {
+      const localT = smoothstep((t - 0.23) / 0.05);
+      const z = THREE.MathUtils.lerp(-6.0, -9.5, localT);
+      const x = THREE.MathUtils.lerp(-1.15, 0, localT);
+      camPos.set(x, 1.85 - localT * 0.1, z);
+      const targetX = THREE.MathUtils.lerp(-2.7, 0, localT);
+      const targetZ = THREE.MathUtils.lerp(-6.0, z - 8, localT);
+      lookAt.set(targetX, 1.75, targetZ);
+      activeArt = ARTWORKS[0];
+      focusIntensity = 1.0 - localT;
+    }
+    // --- CORRIDOR WALK TO OBRA 2 [0.28 -> 0.31] ---
+    else if (t < 0.31) {
+      const localT = smoothstep((t - 0.28) / 0.03);
+      const z = THREE.MathUtils.lerp(-9.5, -11.0, localT);
+      camPos.set(0, 1.75, z);
+      lookAt.set(0, 1.75, z - 8);
+    }
+    // --- OBRA 2: D'AUBIGNY (RIGHT WALL, Z = -13) ---
+    // [0.31 -> 0.37]: Turn & Approach right wall
+    else if (t < 0.37) {
+      const localT = smoothstep((t - 0.31) / 0.06);
+      const z = THREE.MathUtils.lerp(-11.0, -13.0, localT);
+      const x = THREE.MathUtils.lerp(0, 1.15, localT);
+      camPos.set(x, 1.75 + localT * 0.1, z);
+      const targetX = THREE.MathUtils.lerp(0, 2.7, localT);
+      const targetZ = THREE.MathUtils.lerp(z - 8, -13.0, localT);
+      lookAt.set(targetX, 1.85, targetZ);
+      activeArt = ARTWORKS[1];
+      focusIntensity = localT;
+    }
+    // [0.37 -> 0.46]: FULL LOCKED FRONTAL INSPECTION OF OBRA 2
+    else if (t < 0.46) {
+      camPos.set(1.15, 1.85, -13.0);
+      lookAt.set(2.7, 1.85, -13.0);
+      activeArt = ARTWORKS[1];
+      focusIntensity = 1.0;
+    }
+    // [0.46 -> 0.51]: Turn back to hallway axis and resume walk
+    else if (t < 0.51) {
+      const localT = smoothstep((t - 0.46) / 0.05);
+      const z = THREE.MathUtils.lerp(-13.0, -16.5, localT);
+      const x = THREE.MathUtils.lerp(1.15, 0, localT);
+      camPos.set(x, 1.85 - localT * 0.1, z);
+      const targetX = THREE.MathUtils.lerp(2.7, 0, localT);
+      const targetZ = THREE.MathUtils.lerp(-13.0, z - 8, localT);
+      lookAt.set(targetX, 1.75, targetZ);
+      activeArt = ARTWORKS[1];
+      focusIntensity = 1.0 - localT;
+    }
+    // --- CORRIDOR WALK TO OBRA 3 [0.51 -> 0.54] ---
+    else if (t < 0.54) {
+      const localT = smoothstep((t - 0.51) / 0.03);
+      const z = THREE.MathUtils.lerp(-16.5, -18.0, localT);
+      camPos.set(0, 1.75, z);
+      lookAt.set(0, 1.75, z - 8);
+    }
+    // --- OBRA 3: MONTICELLI (LEFT WALL, Z = -20) ---
+    // [0.54 -> 0.60]: Turn & Approach left wall
+    else if (t < 0.60) {
+      const localT = smoothstep((t - 0.54) / 0.06);
+      const z = THREE.MathUtils.lerp(-18.0, -20.0, localT);
+      const x = THREE.MathUtils.lerp(0, -1.15, localT);
+      camPos.set(x, 1.75 + localT * 0.1, z);
+      const targetX = THREE.MathUtils.lerp(0, -2.7, localT);
+      const targetZ = THREE.MathUtils.lerp(z - 8, -20.0, localT);
+      lookAt.set(targetX, 1.85, targetZ);
+      activeArt = ARTWORKS[2];
+      focusIntensity = localT;
+    }
+    // [0.60 -> 0.69]: FULL LOCKED FRONTAL INSPECTION OF OBRA 3
+    else if (t < 0.69) {
+      camPos.set(-1.15, 1.85, -20.0);
+      lookAt.set(-2.7, 1.85, -20.0);
+      activeArt = ARTWORKS[2];
+      focusIntensity = 1.0;
+    }
+    // [0.69 -> 0.74]: Turn back to hallway axis and resume walk
+    else if (t < 0.74) {
+      const localT = smoothstep((t - 0.69) / 0.05);
+      const z = THREE.MathUtils.lerp(-20.0, -23.5, localT);
+      const x = THREE.MathUtils.lerp(-1.15, 0, localT);
+      camPos.set(x, 1.85 - localT * 0.1, z);
+      const targetX = THREE.MathUtils.lerp(-2.7, 0, localT);
+      const targetZ = THREE.MathUtils.lerp(-20.0, z - 8, localT);
+      lookAt.set(targetX, 1.75, targetZ);
+      activeArt = ARTWORKS[2];
+      focusIntensity = 1.0 - localT;
+    }
+    // --- CORRIDOR WALK TO OBRA 4 [0.74 -> 0.77] ---
+    else if (t < 0.77) {
+      const localT = smoothstep((t - 0.74) / 0.03);
+      const z = THREE.MathUtils.lerp(-23.5, -25.0, localT);
+      camPos.set(0, 1.75, z);
+      lookAt.set(0, 1.75, z - 8);
+    }
+    // --- OBRA 4: SFORZA (RIGHT WALL, Z = -27) ---
+    // [0.77 -> 0.83]: Turn & Approach right wall
+    else if (t < 0.83) {
+      const localT = smoothstep((t - 0.77) / 0.06);
+      const z = THREE.MathUtils.lerp(-25.0, -27.0, localT);
+      const x = THREE.MathUtils.lerp(0, 1.15, localT);
+      camPos.set(x, 1.75 + localT * 0.1, z);
+      const targetX = THREE.MathUtils.lerp(0, 2.7, localT);
+      const targetZ = THREE.MathUtils.lerp(z - 8, -27.0, localT);
+      lookAt.set(targetX, 1.85, targetZ);
+      activeArt = ARTWORKS[3];
+      focusIntensity = localT;
+    }
+    // [0.83 -> 0.92]: FULL LOCKED FRONTAL INSPECTION OF OBRA 4
+    else if (t < 0.92) {
+      camPos.set(1.15, 1.85, -27.0);
+      lookAt.set(2.7, 1.85, -27.0);
+      activeArt = ARTWORKS[3];
+      focusIntensity = 1.0;
+    }
+    // [0.92 -> 0.95]: Turn back to hallway axis and resume walk
+    else if (t < 0.95) {
+      const localT = smoothstep((t - 0.92) / 0.03);
+      const z = THREE.MathUtils.lerp(-27.0, -30.0, localT);
+      const x = THREE.MathUtils.lerp(1.15, 0, localT);
+      camPos.set(x, 1.85 - localT * 0.1, z);
+      const targetX = THREE.MathUtils.lerp(2.7, 0, localT);
+      const targetZ = THREE.MathUtils.lerp(-27.0, -34.8, localT);
+      lookAt.set(targetX, 1.95, targetZ);
+      activeArt = ARTWORKS[3];
+      focusIntensity = 1.0 - localT;
+    }
+    // --- OBRA 5: LINDQVIST (TERMINAL CENTRAL WALL, Z = -34.8) [0.95 -> 1.00] ---
+    else {
+      const localT = smoothstep((t - 0.95) / 0.05);
+      const z = THREE.MathUtils.lerp(-30.0, -32.2, localT);
+      camPos.set(0, 1.95, z);
+      lookAt.set(0, 1.95, -34.8);
+      activeArt = ARTWORKS[4];
+      focusIntensity = localT;
     }
 
-    return { pos, target, activeArt, proximity };
+    return { camPos, lookAt, activeArt, focusIntensity };
   };
 
   useEffect(() => {
-    const container = mountRef.current;
+    const container = mountDivRef.current;
     if (!container) return;
 
     // --- 1. SCENE SETUP ---
     const scene = new THREE.Scene();
     sceneRef.current = scene;
     scene.background = new THREE.Color(0xfcfcfc);
-    scene.fog = new THREE.FogExp2(0xfcfcfc, 0.018); // Soft infinite white museum depth
+    scene.fog = new THREE.FogExp2(0xfcfcfc, 0.016);
 
     const width = container.clientWidth || window.innerWidth || 800;
     const height = container.clientHeight || window.innerHeight || 600;
 
     // --- 2. CAMERA SETUP ---
-    const camera = new THREE.PerspectiveCamera(
-      52,
-      width / height,
-      0.1,
-      80
-    );
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 75);
     cameraRef.current = camera;
     camera.position.copy(currentCamPos.current);
     camera.lookAt(currentLookAt.current);
 
-    // --- 3. RENDERER SETUP (Soft Shadows & Filmic ACES Tone Mapping) ---
+    // --- 3. RENDERER SETUP ---
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       powerPreference: 'high-performance',
@@ -218,17 +254,14 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
     container.appendChild(renderer.domElement);
 
     // --- 4. LIGHTING SYSTEM ---
-    // Ambient Light (subtle white gallery bounce)
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
     ambientLightRef.current = ambientLight;
     scene.add(ambientLight);
 
-    // Hemisphere Light (sky white to floor reflection)
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0xe2e2e2, 0.45);
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0xe4e4e4, 0.45);
     scene.add(hemiLight);
 
-    // Directional Skylight through modern museum architectural ceiling slots
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.75);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
     dirLight.position.set(0, 6, -10);
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.width = 2048;
@@ -240,26 +273,25 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
     dirLight.shadow.camera.top = 10;
     dirLight.shadow.camera.bottom = -40;
     dirLight.shadow.bias = -0.0002;
-    dirLight.shadow.radius = 3.5; // Soft shadow radius
+    dirLight.shadow.radius = 3.5;
     dirLightRef.current = dirLight;
     scene.add(dirLight);
 
-    // Dynamic Spectator Light (moves gently with the user's camera)
-    const spectatorLight = new THREE.PointLight(0xfff8ee, 0.5, 9, 1.2);
+    const spectatorLight = new THREE.PointLight(0xfff8ee, 0.4, 8, 1.2);
     spectatorLight.position.copy(camera.position);
     spectatorLightRef.current = spectatorLight;
     scene.add(spectatorLight);
 
-    // --- 5. ARCHITECTURAL WHITE MUSEUM HALLWAY GEOMETRY ---
+    // --- 5. ARCHITECTURAL WHITE CORRIDOR ---
     const corridorLength = 46;
     const corridorWidth = 5.6;
     const corridorHeight = 4.4;
 
-    // A. FLOOR: Polished white architectural limestone / terrazzo with soft sheen
-    const floorGeo = new THREE.PlaneGeometry(corridorWidth, corridorLength, 32, 64);
+    // Floor (Polished white limestone/terrazzo with subtle sheen)
+    const floorGeo = new THREE.PlaneGeometry(corridorWidth, corridorLength, 16, 32);
     const floorMat = new THREE.MeshStandardMaterial({
-      color: 0xf3f3f3,
-      roughness: 0.18, // Subtle museum floor reflection
+      color: 0xf4f4f4,
+      roughness: 0.18,
       metalness: 0.04,
     });
     const floor = new THREE.Mesh(floorGeo, floorMat);
@@ -268,11 +300,10 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
     floor.receiveShadow = true;
     scene.add(floor);
 
-    // Floor Expansion Joints / Subtle Terrazzo Tiles Grid (elegant architectural hairlines)
+    // Floor expansion joints
     const gridGeo = new THREE.BufferGeometry();
     const gridPoints: number[] = [];
-    const tileSpacing = 2.0;
-    for (let z = 5; z >= -corridorLength + 5; z -= tileSpacing) {
+    for (let z = 5; z >= -corridorLength + 5; z -= 2.0) {
       gridPoints.push(-corridorWidth / 2, 0.002, z);
       gridPoints.push(corridorWidth / 2, 0.002, z);
     }
@@ -280,12 +311,11 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
     const gridMat = new THREE.LineBasicMaterial({
       color: 0xe0e0e0,
       transparent: true,
-      opacity: 0.6,
+      opacity: 0.5,
     });
-    const floorGrid = new THREE.LineSegments(gridGeo, gridMat);
-    scene.add(floorGrid);
+    scene.add(new THREE.LineSegments(gridGeo, gridMat));
 
-    // B. CEILING: Clean white ceiling with recessed linear light channels
+    // Ceiling
     const ceilingGeo = new THREE.PlaneGeometry(corridorWidth, corridorLength);
     const ceilingMat = new THREE.MeshStandardMaterial({
       color: 0xfcfcfc,
@@ -297,59 +327,34 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
     ceiling.receiveShadow = true;
     scene.add(ceiling);
 
-    // C. WALLS: Pristine white gallery plaster walls
+    // Walls
     const wallGeo = new THREE.PlaneGeometry(corridorLength, corridorHeight);
     const wallMat = new THREE.MeshStandardMaterial({
       color: 0xfbfbfb,
       roughness: 0.88,
-      metalness: 0.01,
     });
 
-    // Left Wall
     const leftWall = new THREE.Mesh(wallGeo, wallMat);
     leftWall.rotation.y = Math.PI / 2;
     leftWall.position.set(-corridorWidth / 2, corridorHeight / 2, -corridorLength / 2 + 5);
     leftWall.receiveShadow = true;
     scene.add(leftWall);
 
-    // Right Wall
     const rightWall = new THREE.Mesh(wallGeo, wallMat);
     rightWall.rotation.y = -Math.PI / 2;
     rightWall.position.set(corridorWidth / 2, corridorHeight / 2, -corridorLength / 2 + 5);
     rightWall.receiveShadow = true;
     scene.add(rightWall);
 
-    // Back Focal Wall (End of Hallway alcove)
     const backWallGeo = new THREE.PlaneGeometry(corridorWidth, corridorHeight);
     const backWall = new THREE.Mesh(backWallGeo, wallMat);
     backWall.position.set(0, corridorHeight / 2, -corridorLength + 5);
     backWall.receiveShadow = true;
     scene.add(backWall);
 
-    // Entrance Wall
-    const frontWall = new THREE.Mesh(backWallGeo, wallMat);
-    frontWall.rotation.y = Math.PI;
-    frontWall.position.set(0, corridorHeight / 2, 5);
-    frontWall.receiveShadow = true;
-    scene.add(frontWall);
-
-    // D. ARCHITECTURAL BASEBOARDS (Modern minimalist recessed shadow reveals)
-    const baseboardMat = new THREE.MeshStandardMaterial({
-      color: 0xdedede,
-      roughness: 0.5,
-    });
-    const baseboardGeo = new THREE.BoxGeometry(0.04, 0.08, corridorLength);
-    const leftBaseboard = new THREE.Mesh(baseboardGeo, baseboardMat);
-    leftBaseboard.position.set(-corridorWidth / 2 + 0.02, 0.04, -corridorLength / 2 + 5);
-    scene.add(leftBaseboard);
-
-    const rightBaseboard = new THREE.Mesh(baseboardGeo, baseboardMat);
-    rightBaseboard.position.set(corridorWidth / 2 - 0.02, 0.04, -corridorLength / 2 + 5);
-    scene.add(rightBaseboard);
-
-    // E. CEILING TRACK LIGHT RAILS (Two matte bronze/black extruded tracks running overhead)
+    // Ceiling Track Rails
     const trackMat = new THREE.MeshStandardMaterial({
-      color: 0x1e1e1e,
+      color: 0x1f1f1f,
       roughness: 0.3,
       metalness: 0.8,
     });
@@ -362,179 +367,90 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
     rightTrack.position.set(1.6, corridorHeight - 0.03, -corridorLength / 2 + 5);
     scene.add(rightTrack);
 
-    // F. ARCHITECTURAL PORTAL BEAMS (Dividing gallery wings subtly)
+    // Portal Beams
     [-10, -23.5].forEach((portalZ) => {
-      const portalBeamGeo = new THREE.BoxGeometry(corridorWidth, 0.35, 0.4);
-      const portalBeam = new THREE.Mesh(portalBeamGeo, wallMat);
+      const portalBeam = new THREE.Mesh(new THREE.BoxGeometry(corridorWidth, 0.35, 0.4), wallMat);
       portalBeam.position.set(0, corridorHeight - 0.175, portalZ);
       portalBeam.castShadow = true;
       scene.add(portalBeam);
-
-      const columnGeo = new THREE.BoxGeometry(0.35, corridorHeight, 0.4);
-      const leftCol = new THREE.Mesh(columnGeo, wallMat);
-      leftCol.position.set(-corridorWidth / 2 + 0.175, corridorHeight / 2, portalZ);
-      leftCol.castShadow = true;
-      leftCol.receiveShadow = true;
-      scene.add(leftCol);
-
-      const rightCol = new THREE.Mesh(columnGeo, wallMat);
-      rightCol.position.set(corridorWidth / 2 - 0.175, corridorHeight / 2, portalZ);
-      rightCol.castShadow = true;
-      rightCol.receiveShadow = true;
-      scene.add(rightCol);
     });
 
-    // --- 6. ARTWORKS, 3D FRAMES & DYNAMIC SPOTLIGHTS ---
+    // --- 6. ARTWORKS & SPOTLIGHTS ---
     ARTWORKS.forEach((art) => {
       const artGroup = new THREE.Group();
-      artGroup.position.set(art.locationInGallery.x, art.locationInGallery.y, art.locationInGallery.z);
+      artGroup.position.set(
+        art.locationInGallery.x,
+        art.locationInGallery.y,
+        art.locationInGallery.z
+      );
       artGroup.rotation.y = art.locationInGallery.rotationY;
 
-      // 1. Generate high-res canvas texture procedurally
+      // Texture
       const artCanvas = renderArtworkToCanvas(art.id, 1200, 1600);
       const texture = new THREE.CanvasTexture(artCanvas);
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.minFilter = THREE.LinearMipmapLinearFilter;
       texture.magFilter = THREE.LinearFilter;
-      texture.generateMipmaps = true;
 
-      // 2. Painting Canvas Mesh
+      // Canvas
       const canvasW = art.locationInGallery.width;
       const canvasH = art.locationInGallery.height;
       const canvasGeo = new THREE.PlaneGeometry(canvasW, canvasH);
       const canvasMat = new THREE.MeshStandardMaterial({
         map: texture,
         roughness: 0.42,
-        metalness: 0.02,
       });
       const canvasMesh = new THREE.Mesh(canvasGeo, canvasMat);
-      canvasMesh.position.z = 0.045; // Front of frame backing
+      canvasMesh.position.z = 0.045;
       canvasMesh.castShadow = true;
       canvasMesh.receiveShadow = true;
-      // Tag for raycasting
-      canvasMesh.userData = { artworkId: art.id };
       artGroup.add(canvasMesh);
 
-      // 3. 3D Architectural Frame (Outer border with bevel)
+      // Frame
       const frameDepth = 0.08;
       const borderThickness = 0.07;
       const outerW = canvasW + borderThickness * 2;
       const outerH = canvasH + borderThickness * 2;
-
       const frameMat = new THREE.MeshStandardMaterial({
         color: new THREE.Color(art.frameColor),
         roughness: 0.35,
         metalness: 0.25,
       });
 
-      // Frame Backing
-      const backingGeo = new THREE.BoxGeometry(outerW, outerH, 0.03);
-      const backingMesh = new THREE.Mesh(backingGeo, frameMat);
-      backingMesh.position.z = 0.015;
-      backingMesh.castShadow = true;
-      artGroup.add(backingMesh);
+      const backing = new THREE.Mesh(new THREE.BoxGeometry(outerW, outerH, 0.03), frameMat);
+      backing.position.z = 0.015;
+      backing.castShadow = true;
+      artGroup.add(backing);
 
-      // Frame Bezel Profiles (Top, Bottom, Left, Right)
-      const topBarGeo = new THREE.BoxGeometry(outerW, borderThickness, frameDepth);
-      const topBar = new THREE.Mesh(topBarGeo, frameMat);
+      const topBar = new THREE.Mesh(new THREE.BoxGeometry(outerW, borderThickness, frameDepth), frameMat);
       topBar.position.set(0, outerH / 2 - borderThickness / 2, frameDepth / 2);
       topBar.castShadow = true;
       artGroup.add(topBar);
 
-      const bottomBar = new THREE.Mesh(topBarGeo, frameMat);
+      const bottomBar = new THREE.Mesh(new THREE.BoxGeometry(outerW, borderThickness, frameDepth), frameMat);
       bottomBar.position.set(0, -outerH / 2 + borderThickness / 2, frameDepth / 2);
       bottomBar.castShadow = true;
       artGroup.add(bottomBar);
 
-      const sideBarGeo = new THREE.BoxGeometry(borderThickness, canvasH, frameDepth);
-      const leftBar = new THREE.Mesh(sideBarGeo, frameMat);
+      const leftBar = new THREE.Mesh(new THREE.BoxGeometry(borderThickness, canvasH, frameDepth), frameMat);
       leftBar.position.set(-canvasW / 2 - borderThickness / 2, 0, frameDepth / 2);
       leftBar.castShadow = true;
       artGroup.add(leftBar);
 
-      const rightBar = new THREE.Mesh(sideBarGeo, frameMat);
+      const rightBar = new THREE.Mesh(new THREE.BoxGeometry(borderThickness, canvasH, frameDepth), frameMat);
       rightBar.position.set(canvasW / 2 + borderThickness / 2, 0, frameDepth / 2);
       rightBar.castShadow = true;
       artGroup.add(rightBar);
 
-      // Protective Anti-Reflective Glass Plane
-      const glassMat = new THREE.MeshPhysicalMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: 0.12,
-        roughness: 0.08,
-        metalness: 0.1,
-        transmission: 0.9,
-      });
-      const glassMesh = new THREE.Mesh(canvasGeo, glassMat);
-      glassMesh.position.z = 0.065;
-      artGroup.add(glassMesh);
-
-      // 4. Museum Wall Placard (Cédula Museográfica)
-      const placardW = 0.32;
-      const placardH = 0.24;
-      const placardCanvas = document.createElement('canvas');
-      placardCanvas.width = 512;
-      placardCanvas.height = 384;
-      const pCtx = placardCanvas.getContext('2d');
-      if (pCtx) {
-        pCtx.fillStyle = '#ffffff';
-        pCtx.fillRect(0, 0, 512, 384);
-        pCtx.strokeStyle = '#e0e0e0';
-        pCtx.lineWidth = 4;
-        pCtx.strokeRect(4, 4, 504, 376);
-
-        pCtx.fillStyle = '#111111';
-        pCtx.font = 'bold 30px "Cinzel", Georgia, serif';
-        pCtx.fillText(art.artist, 32, 68);
-
-        pCtx.fillStyle = '#555555';
-        pCtx.font = 'italic 24px "Plus Jakarta Sans", sans-serif';
-        pCtx.fillText(`${art.title}, ${art.year}`, 32, 114);
-
-        pCtx.fillStyle = '#888888';
-        pCtx.font = '19px "Plus Jakarta Sans", sans-serif';
-        pCtx.fillText(art.medium.slice(0, 36), 32, 160);
-        pCtx.fillText(art.dimensions, 32, 196);
-
-        // QR / Headphone audio guide icon representation
-        pCtx.fillStyle = '#111111';
-        pCtx.fillRect(32, 240, 60, 60);
-        pCtx.fillStyle = '#ffffff';
-        pCtx.font = 'bold 18px sans-serif';
-        pCtx.fillText('AR/♫', 38, 276);
-
-        pCtx.fillStyle = '#666666';
-        pCtx.font = '18px "Plus Jakarta Sans", sans-serif';
-        pCtx.fillText('Cédula Oficial · Pulsa para info', 106, 276);
-      }
-      const placardTex = new THREE.CanvasTexture(placardCanvas);
-      placardTex.colorSpace = THREE.SRGBColorSpace;
-      const placardGeo = new THREE.PlaneGeometry(placardW, placardH);
-      const placardMat = new THREE.MeshStandardMaterial({
-        map: placardTex,
-        roughness: 0.6,
-      });
-      const placardMesh = new THREE.Mesh(placardGeo, placardMat);
-      // Place placard to the side of the painting
-      const isCentral = art.id === 'constructivism';
-      const placardOffsetSide = isCentral ? outerW / 2 + 0.35 : (art.locationInGallery.wall === 'left' ? outerW / 2 + 0.32 : -outerW / 2 - 0.32);
-      placardMesh.position.set(placardOffsetSide, -canvasH / 3, 0.02);
-      placardMesh.userData = { artworkId: art.id };
-      artGroup.add(placardMesh);
-
       scene.add(artGroup);
-      paintingMeshesRef.current[art.id] = artGroup;
 
-      // 5. Dedicated Ceiling Track Spotlight
-      // Mounted directly on the ceiling rail and pointed at the artwork center
-      const spotLight = new THREE.SpotLight(0xfff6ea, 1.8, 14, Math.PI / 4, 0.5, 1.2);
-      // Position spotlight near ceiling track
+      // Dedicated Spotlight
+      const spotLight = new THREE.SpotLight(0xfff6ea, 1.0, 14, Math.PI / 4, 0.45, 1.2);
+      const isCentral = art.id === 'constructivism';
       const trackX = art.locationInGallery.wall === 'left' ? -1.6 : (isCentral ? 0 : 1.6);
       const spotZ = isCentral ? art.locationInGallery.z + 3.0 : art.locationInGallery.z;
       spotLight.position.set(trackX, corridorHeight - 0.15, spotZ);
 
-      // Target the painting
       const spotTarget = new THREE.Object3D();
       spotTarget.position.set(art.locationInGallery.x, art.locationInGallery.y, art.locationInGallery.z);
       scene.add(spotTarget);
@@ -548,82 +464,9 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
 
       scene.add(spotLight);
       spotlightsRef.current[art.id] = spotLight;
-
-      // Physical Spotlight Fixture Model on Ceiling Track
-      const fixtureMat = new THREE.MeshStandardMaterial({
-        color: 0x222222,
-        roughness: 0.3,
-        metalness: 0.8,
-      });
-      const fixtureArmGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.15);
-      const fixtureArm = new THREE.Mesh(fixtureArmGeo, fixtureMat);
-      fixtureArm.position.copy(spotLight.position);
-      fixtureArm.position.y += 0.075;
-      scene.add(fixtureArm);
-
-      const fixtureCanGeo = new THREE.CylinderGeometry(0.06, 0.04, 0.16);
-      const fixtureCan = new THREE.Mesh(fixtureCanGeo, fixtureMat);
-      fixtureCan.position.copy(spotLight.position);
-      fixtureCan.lookAt(spotTarget.position);
-      fixtureCan.rotateX(Math.PI / 2);
-      scene.add(fixtureCan);
     });
 
-    // --- 7. RAYCASTING & INTERACTION HANDLER ---
-    const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2();
-
-    const handlePointerDown = (e: MouseEvent) => {
-      isDraggingRef.current = true;
-      previousMousePos.current = { x: e.clientX, y: e.clientY };
-    };
-
-    const handlePointerMove = (e: MouseEvent) => {
-      if (!isDraggingRef.current) return;
-      const deltaX = e.clientX - previousMousePos.current.x;
-      const deltaY = e.clientY - previousMousePos.current.y;
-      previousMousePos.current = { x: e.clientX, y: e.clientY };
-
-      // Subtle look-around parallax pan (dampened so it preserves museum aesthetic)
-      userLookOffset.current.x = Math.max(-0.6, Math.min(0.6, userLookOffset.current.x + deltaX * 0.0012));
-      userLookOffset.current.y = Math.max(-0.35, Math.min(0.35, userLookOffset.current.y - deltaY * 0.0012));
-    };
-
-    const handlePointerUp = () => {
-      isDraggingRef.current = false;
-    };
-
-    const handleClick = (e: MouseEvent) => {
-      if (!cameraRef.current || !rendererRef.current) return;
-      const rect = rendererRef.current.domElement.getBoundingClientRect();
-      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
-      raycaster.setFromCamera(mouse, cameraRef.current);
-      const intersects = raycaster.intersectObjects(scene.children, true);
-
-      for (const hit of intersects) {
-        let obj: THREE.Object3D | null = hit.object;
-        while (obj) {
-          if (obj.userData?.artworkId) {
-            const hitArt = ARTWORKS.find((a) => a.id === obj?.userData.artworkId);
-            if (hitArt) {
-              onArtworkClick(hitArt);
-              return;
-            }
-          }
-          obj = obj.parent;
-        }
-      }
-    };
-
-    const canvasDom = renderer.domElement;
-    canvasDom.addEventListener('mousedown', handlePointerDown);
-    window.addEventListener('mousemove', handlePointerMove);
-    window.addEventListener('mouseup', handlePointerUp);
-    canvasDom.addEventListener('click', handleClick);
-
-    // --- 8. RESIZE LISTENER ---
+    // --- 7. RESIZE LISTENER ---
     const handleResize = () => {
       if (!container || !renderer || !camera) return;
       const w = container.clientWidth || window.innerWidth || 800;
@@ -634,57 +477,54 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
     };
     window.addEventListener('resize', handleResize);
 
-    // --- 9. ANIMATION LOOP ---
-    let lastActiveArtId: string | null = null;
+    // --- 8. RENDER LOOP (STRICT ON-RAILS CHOREOGRAPHY) ---
+    let lastActiveId: string | null = null;
 
     const animate = () => {
       reqIdRef.current = requestAnimationFrame(animate);
 
-      // Ease look offset smoothly back toward 0 when not dragging
-      if (!isDraggingRef.current) {
-        userLookOffset.current.x *= 0.94;
-        userLookOffset.current.y *= 0.94;
-      }
-
-      // Compute target camera coordinates based on current scroll progress
-      const { pos: targetCamPos, target: targetLookAt, activeArt, proximity } = getCameraTarget(
+      const { camPos: targetPos, lookAt: targetLookAt, activeArt, focusIntensity } = computeCameraState(
         scrollProgress
       );
 
-      // Smooth camera interpolation (lerping)
-      currentCamPos.current.lerp(targetCamPos, 0.07);
-      currentLookAt.current.lerp(targetLookAt, 0.07);
+      // Smooth camera interpolation
+      currentCamPos.current.lerp(targetPos, 0.08);
+      currentLookAt.current.lerp(targetLookAt, 0.08);
 
       if (cameraRef.current) {
         cameraRef.current.position.copy(currentCamPos.current);
-        const finalLookAt = currentLookAt.current.clone();
-        finalLookAt.x += userLookOffset.current.x * 1.5;
-        finalLookAt.y += userLookOffset.current.y * 1.2;
-        cameraRef.current.lookAt(finalLookAt);
+        cameraRef.current.lookAt(currentLookAt.current);
       }
 
-      // Update moving spectator light
       if (spectatorLightRef.current) {
         spectatorLightRef.current.position.copy(currentCamPos.current);
       }
 
-      // Update dynamic spotlights based on proximity
+      // Dynamic Spotlight modulation based on focusIntensity
       ARTWORKS.forEach((art) => {
         const spot = spotlightsRef.current[art.id];
         if (spot) {
-          const isActive = activeArt?.id === art.id;
-          const targetIntensity = isActive
-            ? 1.5 + proximity * 2.2
-            : 0.8; // Standby gentle illumination
+          const isThisArt = activeArt?.id === art.id;
+          const targetIntensity = isThisArt ? 1.0 + focusIntensity * 2.8 : 0.6;
           spot.intensity = THREE.MathUtils.lerp(spot.intensity, targetIntensity, 0.08);
         }
       });
 
-      // Notify parent about active artwork
-      const currentActiveId = activeArt ? activeArt.id : null;
-      if (currentActiveId !== lastActiveArtId || proximity > 0.01) {
-        lastActiveArtId = currentActiveId;
-        onActiveArtworkChange(activeArt, proximity);
+      // Subtle ambient modulation: gallery dims slightly when focused on a painting to enhance focus
+      if (ambientLightRef.current) {
+        const targetAmb = 0.55 - focusIntensity * 0.22;
+        ambientLightRef.current.intensity = THREE.MathUtils.lerp(
+          ambientLightRef.current.intensity,
+          targetAmb,
+          0.08
+        );
+      }
+
+      // Notify parent
+      const currentId = activeArt ? activeArt.id : null;
+      if (currentId !== lastActiveId || focusIntensity > 0.01) {
+        lastActiveId = currentId;
+        onActiveArtworkChange(activeArt, focusIntensity);
       }
 
       renderer.render(scene, camera);
@@ -692,63 +532,20 @@ export const MuseumCanvas: React.FC<MuseumCanvasProps> = ({
 
     animate();
 
-    // Cleanup
     return () => {
       cancelAnimationFrame(reqIdRef.current);
       window.removeEventListener('resize', handleResize);
-      canvasDom.removeEventListener('mousedown', handlePointerDown);
-      window.removeEventListener('mousemove', handlePointerMove);
-      window.removeEventListener('mouseup', handlePointerUp);
-      canvasDom.removeEventListener('click', handleClick);
-
       if (container && renderer.domElement) {
         container.removeChild(renderer.domElement);
       }
       renderer.dispose();
     };
-  }, []); // Run once on mount
-
-  // React to lighting preset changes
-  useEffect(() => {
-    if (!rendererRef.current || !ambientLightRef.current || !dirLightRef.current) return;
-
-    if (lightingPreset === 'balanced') {
-      rendererRef.current.toneMappingExposure = 1.05;
-      ambientLightRef.current.intensity = 0.55;
-      ambientLightRef.current.color.setHex(0xffffff);
-      dirLightRef.current.intensity = 0.75;
-      dirLightRef.current.color.setHex(0xffffff);
-      if (sceneRef.current) {
-        sceneRef.current.background = new THREE.Color(0xfcfcfc);
-        if (sceneRef.current.fog) sceneRef.current.fog.color.setHex(0xfcfcfc);
-      }
-    } else if (lightingPreset === 'dramatic') {
-      rendererRef.current.toneMappingExposure = 0.95;
-      ambientLightRef.current.intensity = 0.28;
-      ambientLightRef.current.color.setHex(0xf0e6dc);
-      dirLightRef.current.intensity = 0.45;
-      dirLightRef.current.color.setHex(0xffecd2);
-      if (sceneRef.current) {
-        sceneRef.current.background = new THREE.Color(0xeeeae4);
-        if (sceneRef.current.fog) sceneRef.current.fog.color.setHex(0xeeeae4);
-      }
-    } else if (lightingPreset === 'evening') {
-      rendererRef.current.toneMappingExposure = 0.88;
-      ambientLightRef.current.intensity = 0.22;
-      ambientLightRef.current.color.setHex(0xd4cfc5);
-      dirLightRef.current.intensity = 0.35;
-      dirLightRef.current.color.setHex(0xffdfb8);
-      if (sceneRef.current) {
-        sceneRef.current.background = new THREE.Color(0xe0dad1);
-        if (sceneRef.current.fog) sceneRef.current.fog.color.setHex(0xe0dad1);
-      }
-    }
-  }, [lightingPreset]);
+  }, []);
 
   return (
     <div
-      ref={mountRef}
-      className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing select-none"
+      ref={mountDivRef}
+      className="absolute inset-0 w-full h-full select-none pointer-events-none"
     />
   );
 };

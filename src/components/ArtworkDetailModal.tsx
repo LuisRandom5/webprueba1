@@ -9,7 +9,6 @@ interface ArtworkDetailModalProps {
   onClose: () => void;
   onSelectArtwork: (artwork: Artwork) => void;
   allArtworks: Artwork[];
-  onOpenAR: () => void;
 }
 
 export const ArtworkDetailModal: React.FC<ArtworkDetailModalProps> = ({
@@ -18,7 +17,6 @@ export const ArtworkDetailModal: React.FC<ArtworkDetailModalProps> = ({
   onClose,
   onSelectArtwork,
   allArtworks,
-  onOpenAR,
 }) => {
   const [zoomPos, setZoomPos] = useState({ x: 0.5, y: 0.5 });
   const [isHovering, setIsHovering] = useState(false);
@@ -232,20 +230,10 @@ export const ArtworkDetailModal: React.FC<ArtworkDetailModalProps> = ({
             </div>
           </div>
 
-          {/* Primary Action Button (AR View) */}
-          <div className="pt-6 mt-6 border-t border-neutral-200">
-            <button
-              onClick={() => {
-                onClose();
-                onOpenAR();
-              }}
-              className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-neutral-900 hover:bg-neutral-800 text-white font-serif text-xs font-semibold tracking-wider uppercase transition-all shadow-md group"
-            >
-              <Sparkles className="w-4 h-4 text-amber-300 group-hover:scale-110 transition-transform" />
-              <span>Colocar en tu habitación con Realidad Aumentada</span>
-            </button>
-            <p className="text-[11px] text-center text-neutral-400 mt-2">
-              Compatible con teléfonos móviles y tabletas mediante cámara en tiempo real
+          {/* Curatorial technical closing note */}
+          <div className="pt-4 mt-4 border-t border-neutral-200">
+            <p className="text-[11px] text-neutral-500 font-sans leading-relaxed">
+              Obra perteneciente a la colección permanente de Museo Blanco. Para continuar el recorrido por el pasillo principal, cierra esta ficha y continúa haciendo scroll.
             </p>
           </div>
         </div>

@@ -9,7 +9,6 @@ interface CatalogDrawerProps {
   onClose: () => void;
   onSelectArtwork: (artwork: Artwork) => void;
   onJumpToArtwork3D: (artwork: Artwork) => void;
-  onOpenAR: (artwork: Artwork) => void;
 }
 
 export const CatalogDrawer: React.FC<CatalogDrawerProps> = ({
@@ -18,7 +17,6 @@ export const CatalogDrawer: React.FC<CatalogDrawerProps> = ({
   onClose,
   onSelectArtwork,
   onJumpToArtwork3D,
-  onOpenAR,
 }) => {
   if (!isOpen) return null;
 
@@ -99,19 +97,8 @@ export const CatalogDrawer: React.FC<CatalogDrawerProps> = ({
                       }}
                       className="flex items-center gap-1 font-semibold text-neutral-900 hover:text-amber-800 transition-colors"
                     >
-                      <span>Ir en el pasillo 3D</span>
+                      <span>Ir directamente en el pasillo</span>
                       <ArrowRight className="w-3.5 h-3.5" />
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        onOpenAR(art);
-                        onClose();
-                      }}
-                      className="flex items-center gap-1 text-neutral-600 hover:text-black transition-colors"
-                    >
-                      <Sparkles className="w-3 h-3 text-amber-500" />
-                      <span>AR</span>
                     </button>
                   </div>
                 </div>
